@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity 0.6.12;
+pragma experimental ABIEncoderV2;
+
+import "@openzeppelin-contracts-upgradeable/cryptography/MerkleProofUpgradeable.sol";
+
+import "./lib/BadgerGuestlistApi.sol";
+import "./lib/IVault.sol";
+import "./PricingLogic.sol";
+
+// Modified from https://github.com/Badger-Finance/badger-sett-1.5/blob/main/contracts/test/TestVipCappedGuestListBbtcUpgradeable.sol
+
+/**
+ * @notice A guest list contract with price conversion logic.
+ * The owner can invite arbitrary guests
+ * A guest can be added permissionlessly with proof of inclusion in current merkle set
+ * The owner can change the merkle root at any time
+ * Merkle-based permission that has been claimed cannot be revoked permissionlessly.
+ * Any guests can be revoked by the owner at-will
+ * The TVL cap is based on the number of want tokens in the underlying vaults.
+ * This can only be made more permissive over time. If decreased, existing TVL is maintained and no deposits are possible until the TVL has gone below the threshold
+ * A variant of the yearn AffiliateToken that supports guest list control of deposits
+ * A guest list that gates access by merkle root and a TVL cap
+ * userDepositCap & totalDepositCap can be supplied in dollars amount and then converted internally to want tokens amount before updating
+ * @notice authorized function to ignore merkle proof for testing, inspiration from yearn's approach to testing guestlist https://github.com/yearn/yearn-devdocs/blob/4664fdef7d10f3a767fa651975059c44cf1cdb37/docs/developers/v2/smart-contracts/test/TestGuestList.md
+ */
+contract GuestList is PricingLogic, BadgerGuestListApi {
+    address public wrapper;
+
+    bytes32 public guestRoot;
+    uint256 public userDepositCap;
+    uint256 public totalDepositCap;
+
+    mapping(address => bool) public guests;
+
+    bool private isLp;
+
+    event ProveInvitation(address indexed account, bytes32 indexed guestRoot);
+    event SetGuestRoot(bytes32 indexed guestRoot);
+    event SetUserDepositCap(uint256 cap);
+    event SetTotalDepositCap(uint256 cap);
+
+    /**
+     * @notice Create guest list, setting the message sender as
+     * `owner`.
+     */
+    function initialize(
+        address _wrapper,
+        bytes32 _guestRoot,
+        address[] calldata _uniswapRouters,
+        address _solidlyRouter,
+        address _curveRouter,
+        uint256 _userDepositCap,
+        uint256 _totalDepositCap,
+        address _stableCoin,
+        bool _isLP
+    ) public initializer {
+        __Pricing_init(_uniswapRouters, _solidlyRouter, _curveRouter);
+        wrapper = _wrapper;
+        guestRoot = _guestRoot;
+
+        isLp = _isLP;
+
+        address want = IVault(wrapper).token();
+        uint256 price = _price(want, _stableCoin);
+
+        userDepositCap = _stableToWant(
+            _stableCoin,
+            want,
+            _userDepositCap,
+            price
+        );
+
+        require(userDepositCap > 0, "userDepositCap zero");
+
+        totalDepositCap = _stableToWant(
+            _stableCoin,
+            want,
+            _totalDepositCap,
+            price
+        );
+
+        require(totalDepositCap > 0, "totalDepositCap zero");
+    }
+
+    /**
+     * @notice Invite guests or kick them from the party.
+     * @param _guests The guests to add or update.
+     * @param _invited A flag for each guest at the matching index, inviting or
+     * uninviting the guest.
+     */
+    function setGuests(address[] calldata _guests, bool[] calldata _invited)
+        external
+        override
+        onlyOwner
+    {
+        _setGuests(_guests, _invited);
+    }
+
+    function remainingTotalDepositAllowed() public view returns (uint256) {
+        return totalDepositCap.sub(IERC20(wrapper).totalSupply());
+    }
+
+    function remainingUserDepositAllowed(address user)
+        public
+        view
+        returns (uint256)
+    {
+        return userDepositCap.sub(IERC20(wrapper).balanceOf(user));
+    }
+
+    /**
+     * @notice Permissionly prove an address is included in the current merkle root, thereby granting access
+     * @notice Note that the list is designed to ONLY EXPAND in future instances
+     * @notice The admin does retain the ability to ban individual addresses
+     */
+    function proveInvitation(address account, bytes32[] calldata merkleProof)
+        public
+    {
+        // Verify Merkle Proof
+        require(_verifyInvitationProof(account, merkleProof));
+
+        address[] memory accounts = new address[](1);
+        bool[] memory invited = new bool[](1);
+
+        accounts[0] = account;
+        invited[0] = true;
+
+        _setGuests(accounts, invited);
+
+        emit ProveInvitation(account, guestRoot);
+    }
+
+    /**
+     * @notice Set the merkle root to verify invitation proofs against.
+     * @notice Note that accounts not included in the root will still be invited if their inviation was previously approved.
+     * @notice Setting to 0 removes proof verification versus the root, opening access
+     */
+    function setGuestRoot(bytes32 guestRoot_) external onlyOwner {
+        guestRoot = guestRoot_;
+
+        emit SetGuestRoot(guestRoot);
+    }
+
+    /**
+     * @notice the method takes a max deposit cap in USD, converts it to the vault's want token denomination & updates the respective param
+     * @param _cap max amount a user can deposit denominated in USD ( i.e 10000 means $10000)
+     * @param _stableCoin address of the stablecoin which will be used to check for liquidity against on DEXs
+     *                    if you put USDT address on _stableCoin param, the contract will check for the price
+                        of the want in Want/USDT liquidity pools. Please note to only enter stablecoin addresses
+                        with good liquidity like USDC or USDT, etc.
+     *
+     */
+    function setUserDepositCap(uint256 _cap, address _stableCoin)
+        external
+        onlyOwner
+    {
+        address want = IVault(wrapper).token();
+        uint256 price = _price(want, _stableCoin);
+        userDepositCap = _stableToWant(_stableCoin, want, _cap, price);
+
+        emit SetUserDepositCap(userDepositCap);
+    }
+
+    /**
+     * @notice set user cap directly in want denomination (not in USD)
+     * @param _cap amount of want
+     */
+    function setUserDepositCapInWant(uint256 _cap) external onlyOwner {
+        userDepositCap = _cap;
+
+        emit SetUserDepositCap(userDepositCap);
+    }
+
+    function setTotalDepositCap(uint256 _cap, address _stableCoin)
+        external
+        onlyOwner
+    {
+        address want = IVault(wrapper).token();
+        uint256 price = _price(want, _stableCoin);
+        totalDepositCap = _stableToWant(_stableCoin, want, _cap, price);
+
+        emit SetTotalDepositCap(totalDepositCap);
+    }
+
+    /**
+     * @notice set total cap directly in want denomination (not in USD)
+     * @param _cap amount of want
+     */
+    function setTotalDepositCapInWant(uint256 _cap) external onlyOwner {
+        totalDepositCap = _cap;
+
+        emit SetTotalDepositCap(totalDepositCap);
+    }
+
+    /**
+     * @notice Check if a guest with a bag of a certain size is allowed into
+     * the party.
+     * @param _guest The guest's address to check.
+     */
+    function authorized(
+        address _guest,
+        uint256 _amount,
+        bytes32[] calldata _merkleProof
+    ) external view override returns (bool) {
+        // Yes: If the user is on the list, and under the cap
+        // Yes: If the user is not on the list, and is under the cap
+        // No: If the user is not on the list, or is over the cap
+        bool invited = guests[_guest];
+
+        // If the user was previously invited, or proved invitiation via list, verify if the amount to deposit keeps them under the cap
+        if (
+            invited &&
+            remainingUserDepositAllowed(_guest) >= _amount &&
+            remainingTotalDepositAllowed() >= _amount
+        ) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    function _setGuests(address[] memory _guests, bool[] memory _invited)
+        internal
+    {
+        require(_guests.length == _invited.length);
+        for (uint256 i = 0; i < _guests.length; i++) {
+            if (_guests[i] == address(0)) {
+                break;
+            }
+            guests[_guests[i]] = _invited[i];
+        }
+    }
+
+    function _verifyInvitationProof(
+        address account,
+        bytes32[] calldata merkleProof
+    ) internal view returns (bool) {
+        bytes32 node = keccak256(abi.encodePacked(account));
+        return MerkleProofUpgradeable.verify(merkleProof, guestRoot, node);
+    }
+
+    function _stableToWant(
+        address _stableCoin,
+        address _want,
+        uint256 _wantAmountInDollars,
+        uint256 _wantPricePerToken
+    ) internal view returns (uint256) {
+        uint256 stableCoinDecimals = IERC20(_stableCoin).decimals();
+        uint256 wantDecimals = IERC20(_want).decimals();
+
+        return
+            _wantAmountInDollars
+                .mul(10**(stableCoinDecimals + wantDecimals))
+                .div(_wantPricePerToken);
+    }
+
+    function _price(address _want, address _stableCoin)
+        internal
+        view
+        returns (uint256 price)
+    {
+        if (isLp) {
+            price = getLpPrice(_want, _stableCoin);
+        } else {
+            price = getOptimalPrice(_want, _stableCoin);
+        }
+
+        require(price > 0, "price was zero");
+    }
+}
