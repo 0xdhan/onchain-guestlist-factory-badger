@@ -73,7 +73,7 @@ def governance(deployed_guestlist):
 
 @pytest.fixture
 def randomUser():
-    return accounts.at("0x6a3528677e598b47952749b08469ce806c2524e7", force=True)
+    return accounts.at("0xB37D31b2A74029B5951a2778F959282E2D518595", force=True)
 
 @pytest.fixture
 def guestlist(deployed_guestlist):
