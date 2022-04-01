@@ -101,7 +101,7 @@ underlying token individually including some more calculation.
 
 <img width="707" alt="Screenshot 2022-03-14 at 7 14 16 PM" src="https://user-images.githubusercontent.com/101333892/158185434-7e93faa1-75c4-424c-a53a-f3e81a47d7ec.png">
 
-## Deployments (FTM Chain)
+## Deployments (FTM Mainnet)
 
 (Production deployment scripts have been added to the scripts folder)
 
