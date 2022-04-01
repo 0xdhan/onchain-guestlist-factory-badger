@@ -39,7 +39,7 @@ Internally the contract will convert it to equivalent want amount and update the
 There are two cases here. Either the want of the vault is a noraml ERC20 token or an LP token.
 The price derivation for a LP token is a little different than a normal ERC20 token.
 
-First step is to get the price of one want token in terms of USD. Then we can use that to convert userDepositCap from USD to want.
+First step for the contract is to get the price of one want token in terms of USD. Then the contract can use that to convert userDepositCap from USD to want.
 
 #### Case 1: If the vault want is a normal token
 
